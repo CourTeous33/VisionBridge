@@ -1,184 +1,201 @@
-import requests
-from bs4 import BeautifulSoup
-import re
-from typing import Dict, List, Tuple
-import openai
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+blind_crawler.py
 
-class WebsiteAccessibilityAgent:
-    def __init__(self, api_key: str):
-        """Initialize the agent with the OpenAI API key."""
-        self.api_key = api_key
-        openai.api_key = api_key
-        
-    def fetch_webpage(self, url: str) -> str:
-        """Fetch the HTML content of a webpage."""
+A general crawler framework for extracting content in a blind-friendly manner:
+1. Use requests + BeautifulSoup for static pages
+2. Use Selenium for simulating clicks and executing JavaScript
+3. Use OpenAI LLM to extract key content and suggest click selectors
+"""
+
+import time
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+from selenium import webdriver
+
+from openai import OpenAI
+import pyttsx3
+import json as _json
+from urllib.parse import urlparse
+
+class BlindCrawler:
+    def __init__(self, start_url, api_key,
+                 max_pages=50, delay=1.0,
+                 headless=True):
+        self.start_url = start_url
+        self.domain = None
+
+
+        # Initialize Selenium WebDriver
+        options = Options()
+        if headless:
+            options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+        self.driver = webdriver.Chrome(options=options)
+
+        # Initialize text-to-speech engine
+        self.tts_engine = pyttsx3.init()
+
+        # Initialize OpenAI client
+        self.client = OpenAI(api_key=api_key)
+
+    def fetch_dynamic(self, url, click_selector=None):
+        """Load and render page with Selenium and simulate clicks if necessary"""
+        self.driver.get(url)
+        # Wait for main article content to load
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            print(f"Error fetching webpage: {e}")
-            return ""
-    
-    def preprocess_html(self, html_content: str) -> BeautifulSoup:
-        """Parse and preprocess the HTML content."""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.extract()
-            
-        return soup
-    
-    def extract_main_content(self, soup: BeautifulSoup) -> str:
-        """Extract the main content from the webpage."""
-        # Try to find main content containers
-        main_tags = soup.find_all(['main', 'article', 'div', 'section'], 
-                                 class_=re.compile(r'(content|main|article)'))
-        
-        if main_tags:
-            # Use the largest content block as the main content
-            main_content = max(main_tags, key=lambda x: len(x.get_text()))
-            return main_content.get_text(strip=True)
-        
-        # Fallback: use body content
-        return soup.body.get_text(strip=True)
-    
-    def extract_interactive_elements(self, soup: BeautifulSoup) -> List[Dict]:
-        """Extract interactive elements like buttons, links, and forms."""
-        interactive_elements = []
-        
-        # Extract links
-        for link in soup.find_all('a', href=True):
-            text = link.get_text(strip=True)
-            if text:
-                interactive_elements.append({
-                    'type': 'link',
-                    'text': text,
-                    'href': link['href']
-                })
-        
-        # Extract buttons
-        for button in soup.find_all(['button', 'input']):
-            if button.name == 'input' and button.get('type') not in ['submit', 'button', 'reset']:
-                continue
-                
-            text = button.get_text(strip=True) or button.get('value', '') or button.get('aria-label', '')
-            if text:
-                interactive_elements.append({
-                    'type': 'button',
-                    'text': text
-                })
-        
-        # Extract forms
-        for form in soup.find_all('form'):
-            form_elements = []
-            for input_field in form.find_all(['input', 'textarea', 'select']):
-                field_type = input_field.get('type', input_field.name)
-                label_text = ""
-                
-                # Try to find label
-                if input_field.get('id'):
-                    label = soup.find('label', attrs={'for': input_field['id']})
-                    if label:
-                        label_text = label.get_text(strip=True)
-                
-                form_elements.append({
-                    'field_type': field_type,
-                    'label': label_text,
-                    'name': input_field.get('name', ''),
-                    'placeholder': input_field.get('placeholder', '')
-                })
-                
-            if form_elements:
-                interactive_elements.append({
-                    'type': 'form',
-                    'elements': form_elements
-                })
-        
-        return interactive_elements
-    
-    def use_llm_to_summarize(self, content: str, elements: List[Dict]) -> str:
-        """Use LLM to summarize and format the content for blind users."""
-        try:
-            # Prepare the elements for the prompt
-            elements_text = ""
-            for i, elem in enumerate(elements[:20]):  # Limit to first 20 elements
-                if elem['type'] == 'link':
-                    elements_text += f"{i+1}. Link: {elem['text']} (URL: {elem['href']})\n"
-                elif elem['type'] == 'button':
-                    elements_text += f"{i+1}. Button: {elem['text']}\n"
-                elif elem['type'] == 'form':
-                    elements_text += f"{i+1}. Form with fields: "
-                    for field in elem['elements']:
-                        label = field['label'] or field['placeholder'] or field['name']
-                        elements_text += f"{label} ({field['field_type']}), "
-                    elements_text = elements_text.rstrip(', ') + "\n"
-            
-            # Truncate content if too long
-            if len(content) > 4000:
-                content = content[:4000] + "..."
-                
-            prompt = f"""
-            You are an accessibility assistant for blind users. Extract and summarize the main content 
-            and interactive elements from this webpage in a clear, concise format.
-            
-            WEBPAGE CONTENT:
-            {content}
-            
-            INTERACTIVE ELEMENTS:
-            {elements_text}
-            
-            Please provide:
-            1. A brief title/summary of what this page is about
-            2. The main content summarized in 3-5 sentences
-            3. A structured list of the most important interactive elements
-            4. Any other critical information a blind user should know about this page
-            
-            Format your response in a clean, screen-reader friendly way.
-            """
-            
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are an accessibility assistant for blind users."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000,
-                temperature=0.3
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "article"))
             )
-            
-            return response.choices[0].message.content
-            
-        except Exception as e:
-            print(f"Error using LLM: {e}")
-            return f"Error generating summary. Raw content: {content[:500]}..."
-    
-    def process_url(self, url: str) -> str:
-        """Process a URL and return accessible content."""
-        html_content = self.fetch_webpage(url)
-        if not html_content:
-            return "Failed to fetch webpage."
-            
-        soup = self.preprocess_html(html_content)
-        main_content = self.extract_main_content(soup)
-        interactive_elements = self.extract_interactive_elements(soup)
-        
-        return self.use_llm_to_summarize(main_content, interactive_elements)
+        except Exception:
+            pass
+        if click_selector:
+            try:
+                btn = self.driver.find_element(By.CSS_SELECTOR, click_selector)
+                btn.click()
+                time.sleep(1)
+            except Exception:
+                pass
+        # Scroll to bottom to load any lazy-loaded content
+        try:
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+        except Exception:
+            pass
+        # Attempt to extract only the main article content to limit context size
+        try:
+            article_element = self.driver.find_element(By.TAG_NAME, "article")
+            return article_element.get_attribute("outerHTML")
+        except Exception:
+            return self.driver.page_source
 
-# Example usage
+    def analyze_with_llm(self, html):
+        """
+        Call ChatGPT:
+         - Extract the main points of the page most relevant to blind users
+         - Return a concise summary and an optional CSS selector for suggested clicks
+        """
+        prompt = (
+            "You are an intelligent assistant helping visually impaired users navigate web content.\n"
+            "1. Based on the HTML content below, extract the main topic and key information, and provide a concise summary.\n"
+            "2. If further clicks are needed to reveal more content, provide a CSS selector; otherwise, return an empty string.\n\n"
+            f"--- HTML START ---\n{html}\n--- HTML END ---\n\n"
+            "Please output in JSON format:\n"
+            '{"summary": "...", "click_selector": "..."}'
+        )
+        resp = self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        try:
+            return _json.loads(resp.choices[0].message.content.strip())
+        except Exception:
+            # On parsing error, return the full text instead
+            return {"summary": resp.choices[0].message.content, "click_selector": ""}
+
+    def crawl(self):
+        """Fetch, analyze, and speak a single page specified by start_url using only Selenium."""
+        url = self.start_url
+        # Extract domain to read only the host part
+        parsed = urlparse(url)
+        domain = parsed.netloc or parsed.path.split('/')[0]
+        print(f"Visiting: {url}")
+        # Announce the start of visiting
+        try:
+            self.tts_engine.say(f"I am currently visiting {domain}, please wait")
+            self.tts_engine.runAndWait()
+        except Exception as e:
+            print(f"[TTS Error] {e}")
+        # Initial page load with Selenium
+        try:
+            html = self.fetch_dynamic(url)
+        except Exception:
+            html = ""
+        # LLM analysis
+        result = self.analyze_with_llm(html)
+        summary = result.get("summary", "")
+        selector = result.get("click_selector", "").strip()
+        # If there's a click selector, reload and re-analyze
+        if selector:
+            try:
+                html = self.fetch_dynamic(url, selector)
+                result2 = self.analyze_with_llm(html)
+                summary = result2.get("summary", summary)
+            except Exception:
+                pass
+
+        # Normalize summary: extract actual summary text if JSON or fenced code
+        if isinstance(summary, str):
+            raw = summary.strip()
+            # Remove fenced code blocks and language tags
+            if raw.startswith("```"):
+                start = raw.find('{')
+                end = raw.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    raw = raw[start:end+1]
+            # Try to parse JSON object to get the inner "summary" field
+            try:
+                data = _json.loads(raw)
+                summary = data.get("summary", raw)
+            except Exception:
+                # If not valid JSON, use the cleaned raw text
+                summary = raw
+
+        print("→ Summary:", summary, "\n")
+        try:
+            self.tts_engine.say(summary)
+            self.tts_engine.runAndWait()
+        except Exception as e:
+            print(f"[TTS Error] {e}")
+
+        # Enter interactive loop for user-driven clicks
+        while True:
+            choice = input("Enter CSS selector to click (or 'exit' to quit): ").strip()
+            if choice.lower() in ('exit', 'quit'):
+                break
+            # Perform click and re-analyze
+            try:
+                html = self.fetch_dynamic(url, choice)
+                result2 = self.analyze_with_llm(html)
+                summary = result2.get("summary", "")
+                # Normalize summary JSON/code if needed
+                if isinstance(summary, str):
+                    raw = summary.strip()
+                    if raw.startswith("```"):
+                        start = raw.find('{')
+                        end = raw.rfind('}')
+                        if start != -1 and end != -1 and end > start:
+                            raw = raw[start:end+1]
+                    try:
+                        data = _json.loads(raw)
+                        summary = data.get("summary", raw)
+                    except Exception:
+                        summary = raw
+                print("→ Summary:", summary, "\n")
+                self.tts_engine.say(summary)
+                self.tts_engine.runAndWait()
+            except Exception as e:
+                print(f"[Interaction Error] {e}")
+
+        # Clean up after user exits
+        self.driver.quit()
+        print("Crawling completed.")
+
 if __name__ == "__main__":
     import os
-    api_key = os.environ.get("OPENAI_API_KEY")
-    
-    if not api_key:
-        print("Please set the OPENAI_API_KEY environment variable.")
-        exit(1)
-        
-    agent = WebsiteAccessibilityAgent(api_key)
-    url = "https://example.com"  # Replace with the URL you want to process
-    result = agent.process_url(url)
-    print(result)
+    # Read API key from environment variable (or set it directly here)
+    OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+    START_URL   = "https://edition.cnn.com/travel/hagia-sophia-istanbul-hidden-history/index.html"
+    crawler = BlindCrawler(
+        start_url=START_URL,
+        api_key=OPENAI_KEY,
+        max_pages=30,
+        delay=1.5,
+        headless=True
+    )
+    crawler.crawl()
