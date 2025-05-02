@@ -505,16 +505,13 @@ class BlindCrawler:
         total_pages = (len(self.all_clickable_items) + self.items_per_page - 1) // self.items_per_page
         page_info = f"Page {self.current_page + 1} of {total_pages}. "
         
-        if total_pages > 1:
-            if self.current_page < total_pages - 1:
-                page_info += "Press Enter to hear more options. "
-        
         speech_text = (
             page_info
-            + "The following clickable items are available. "
+            + ("The following clickable items are available. " if self.current_page < 1 else "")
             + ". ".join(options)
-            + ". To click an item, say its number. To exit, say exit."
-            + " Press the spacebar at any time to repeat these options."
+            + (". Press Enter to hear more options. " if total_pages > 1 and self.current_page < total_pages - 1 else "")
+            + (". To click an item, say its number. To exit, say exit." if self.current_page < 1 else "")
+            + (" Press the spacebar to repeat these options." if self.current_page < 1 else "")
         )
         
         print(f"Announcing {len(self.clickable_items)} clickable items")
