@@ -45,34 +45,83 @@ class BlindCrawler:
         self.global_listener.start()
 
     def fetch_dynamic(self, url, click_selector=None):
-        self.driver.get(url)
-        # Wait for article to load
         try:
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "article"))
-            )
-        except:
-            pass
-        if click_selector:
+            print(f"Fetching URL: {url}")
+            self.driver.get(url)
+            # 等待页面加载
             try:
-                el = self.driver.find_element(By.CSS_SELECTOR, click_selector)
-                el.click()
-                time.sleep(1)
+                # 等待页面准备就绪
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+                print("Page loaded (readyState complete)")
+            except Exception as e:
+                print(f"Wait for page load error: {e}")
+                
+            # 等待可见内容出现
+            for selector in ["article", "main", "#content", ".content", "body"]:
+                try:
+                    WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    print(f"Found visible content with selector: {selector}")
+                    break
+                except:
+                    continue
+            
+            # 如果需要点击某个元素
+            if click_selector:
+                print(f"Attempting to click selector: {click_selector}")
+                try:
+                    # 等待元素可点击
+                    element = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, click_selector))
+                    )
+                    # 滚动到元素
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                    time.sleep(0.5)
+                    # 尝试点击
+                    try:
+                        element.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", element)
+                    print(f"Clicked element with selector: {click_selector}")
+                    # 等待点击后页面变化
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"Click selector error: {e}")
+                    
+            # 执行渐进式滚动，以加载所有延迟内容
+            try:
+                # 获取页面高度
+                total_height = self.driver.execute_script("return document.body.scrollHeight")
+                # 以较小的步幅滚动
+                for i in range(3):
+                    scroll_height = (i+1) * total_height / 3
+                    self.driver.execute_script(f"window.scrollTo(0, {scroll_height});")
+                    time.sleep(0.5)
+                # 滚动回顶部
+                self.driver.execute_script("window.scrollTo(0, 0);")
+                print("Completed progressive scrolling")
+            except Exception as e:
+                print(f"Scroll error: {e}")
+                
+            # 尝试找到主要内容
+            try:
+                article = self.driver.find_element(By.TAG_NAME, "article")
+                return article.get_attribute("outerHTML")
             except:
-                pass
-        # Scroll to load lazy content
-        try:
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-        except:
-            pass
-        # Return only article HTML if possible
-        try:
-            article = self.driver.find_element(By.TAG_NAME, "article")
-            return article.get_attribute("outerHTML")
-        except:
+                try:
+                    main = self.driver.find_element(By.TAG_NAME, "main")
+                    return main.get_attribute("outerHTML")
+                except:
+                    # 如果找不到特定内容容器，返回整个页面
+                    return self.driver.page_source
+        except Exception as e:
+            print(f"[Fetch Error] {e}")
+            # 返回当前页面内容，即使是错误页面
             return self.driver.page_source
-
+    
     def analyze_with_llm(self, html):
         prompt = (
             "You are an intelligent assistant helping visually impaired users navigate web content.\n"
