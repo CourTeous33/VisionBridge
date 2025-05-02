@@ -810,8 +810,49 @@ class BlindCrawler:
                     new_text = post_click_snapshot['bodyText'].replace(pre_click_snapshot['bodyText'], '').strip()
                     if new_text:
                         self.speak("New content: " + new_text)
-                    # Announce only the new clickable items
-                    self.announce_clickables()
+                    # Prioritize newly added clickable items
+                    prev_ids = {identifier for _, identifier in self.all_clickable_items}
+                    # Re-scan clickable elements on the updated DOM
+                    combined_selector = ", ".join([
+                        "a[href]:not([href='#']):not([aria-hidden='true'])",
+                        "button:not([aria-hidden='true'])",
+                        "[role='button']",
+                        "input[type='submit']",
+                        ".btn",
+                        "[onclick]",
+                        "[tabindex='0']"
+                    ])
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, combined_selector)
+                    # Filter visible elements and collect identifiers
+                    new_visible = []
+                    for el in elements:
+                        if el.is_displayed():
+                            text = el.text.strip()
+                            aria = el.get_attribute("aria-label") or ""
+                            title = el.get_attribute("title") or ""
+                            value = el.get_attribute("value") or ""
+                            identifier = text or aria or title or value
+                            if identifier:
+                                new_visible.append((el, identifier))
+                    # Deduplicate by identifier
+                    seen = set()
+                    unique_new = []
+                    for el, identifier in new_visible:
+                        key = identifier[:30].lower()
+                        if key not in seen:
+                            seen.add(key)
+                            unique_new.append((el, identifier))
+                    # Extract only the newly added items
+                    new_items = [(el, identifier) for el, identifier in unique_new if identifier not in prev_ids]
+                    if new_items:
+                        # Announce only new clickable items first
+                        self.all_clickable_items = new_items
+                        self.current_page = 0
+                        self.items_per_page = len(new_items)
+                        self._announce_current_page()
+                    else:
+                        # Fallback to announcing all items if no new ones detected
+                        self.announce_clickables()
                     # Skip full analysis and wait for user selection
                     continue
                 # Otherwise, full-analysis path
