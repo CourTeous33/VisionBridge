@@ -386,7 +386,7 @@ class BlindCrawler:
             }
 
     def announce_clickables(self):
-        """Get and announce clickable items on the page, more robust implementation"""
+        """Get and announce clickable items on the page with pagination support"""
         try:
             # Ensure page has stabilized
             time.sleep(1)
@@ -439,7 +439,7 @@ class BlindCrawler:
                         if identifier:
                             visible_elements.append((el, identifier))
                 except Exception as e:
-                    # Ignore stale element errors
+                    # Ignore stale element references
                     if "stale element reference" not in str(e).lower():
                         print(f"Element visibility check error: {e}")
                     continue
@@ -458,35 +458,19 @@ class BlindCrawler:
                     
             print(f"Deduplicated to {len(unique_elements)} unique elements")
             
-            # Keep at most 5 elements
-            self.clickable_items = [el for el, _ in unique_elements[:5]]
+            # Store all clickable items for pagination
+            self.all_clickable_items = [(el, identifier) for el, identifier in unique_elements]
+            self.current_page = 0
+            self.items_per_page = 5
+            total_pages = (len(self.all_clickable_items) + self.items_per_page - 1) // self.items_per_page
             
-            if self.clickable_items:
-                # Create speech prompt
-                options = []
-                for i, (el, identifier) in enumerate(unique_elements[:5]):
-                    # Limit identifier length to make it easier to understand
-                    short_id = identifier if len(identifier) < 30 else identifier[:27] + "..."
-                    options.append(f"Option {i+1}: {short_id}")
-                
-                speech_text = (
-                    "The following clickable items are available. "
-                    + ". ".join(options)
-                    + ". To click an item, say its number. To exit, say exit."
-                    + " Press the spacebar at any time to repeat these options."
-                )
-            else:
-                speech_text = (
-                    "No clickable items detected on this page. To exit, say exit."
-                    + " Press the spacebar at any time to repeat these options."
-                )
+            self._announce_current_page()
             
-            print(f"Announcing {len(self.clickable_items)} clickable items")
-            self.speak(speech_text)
         except Exception as e:
             print(f"[Announce Clickables Error] {e}")
             self.speak("There was an error identifying clickable elements.")
             # Reset clickable items list
+            self.all_clickable_items = []
             self.clickable_items = []
 
     def _on_press_global(self, key):
@@ -495,6 +479,46 @@ class BlindCrawler:
                 self.announce_clickables()
         except:
             pass
+
+    def _announce_current_page(self):
+        """Announce the current page of clickable items"""
+        start_idx = self.current_page * self.items_per_page
+        end_idx = min(start_idx + self.items_per_page, len(self.all_clickable_items))
+        
+        # Update current page clickable items
+        current_page_items = self.all_clickable_items[start_idx:end_idx]
+        self.clickable_items = [el for el, _ in current_page_items]
+        
+        if not self.clickable_items:
+            speech_text = "No clickable items detected on this page. To exit, say exit."
+            self.speak(speech_text)
+            return
+            
+        # Create speech prompt
+        options = []
+        for i, (_, identifier) in enumerate(current_page_items):
+            # Limit identifier length to make it easier to understand
+            short_id = identifier if len(identifier) < 30 else identifier[:27] + "..."
+            options.append(f"Option {i+1}: {short_id}")
+        
+        # Information about pagination
+        total_pages = (len(self.all_clickable_items) + self.items_per_page - 1) // self.items_per_page
+        page_info = f"Page {self.current_page + 1} of {total_pages}. "
+        
+        if total_pages > 1:
+            if self.current_page < total_pages - 1:
+                page_info += "Press Enter to hear more options. "
+        
+        speech_text = (
+            page_info
+            + "The following clickable items are available. "
+            + ". ".join(options)
+            + ". To click an item, say its number. To exit, say exit."
+            + " Press the spacebar at any time to repeat these options."
+        )
+        
+        print(f"Announcing {len(self.clickable_items)} clickable items")
+        self.speak(speech_text)
 
     def crawl(self):
         # Initial visit
@@ -541,6 +565,13 @@ class BlindCrawler:
         self.interactive = True
         while True:
             choice = input("Enter option number (or 'exit'): ").strip()
+            if choice == "":
+                # Advance to next page of clickable items
+                total_pages = (len(self.all_clickable_items) + self.items_per_page - 1) // self.items_per_page
+                if self.current_page < total_pages - 1:
+                    self.current_page += 1
+                self._announce_current_page()
+                continue
             if choice.lower() in ('exit','quit'):
                 break
                 
@@ -776,10 +807,19 @@ class BlindCrawler:
                 url = self.driver.current_url
                 parsed = urlparse(url)
                 domain = parsed.netloc
-                
-                # Tell user where they are now
-                if content_changed:
-                    self.speak(f"Page content has updated. Analyzing new content...")
+                # If still on the same page but DOM updated, announce only new content and new clickables
+                if content_changed and url == current_url:
+                    # Determine newly added text
+                    new_text = post_click_snapshot['bodyText'].replace(pre_click_snapshot['bodyText'], '').strip()
+                    if new_text:
+                        self.speak("New content: " + new_text)
+                    # Announce only the new clickable items
+                    self.announce_clickables()
+                    # Skip full analysis and wait for user selection
+                    continue
+                # Otherwise, full-analysis path
+                if url != current_url:
+                    self.speak(f"Page changed to {domain}. Analyzing new content...")
                 else:
                     self.speak(f"Still on {domain}. Analyzing current page content...")
                     
