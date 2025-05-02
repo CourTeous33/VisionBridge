@@ -21,6 +21,7 @@ from openai import OpenAI
 import pyttsx3
 import json as _json
 from urllib.parse import urlparse
+from pynput import keyboard
 
 class BlindCrawler:
     def __init__(self, start_url, api_key,
@@ -42,6 +43,12 @@ class BlindCrawler:
 
         # Initialize OpenAI client
         self.client = OpenAI(api_key=api_key)
+
+        # Setup global listener for spacebar to re-announce clickables
+        self.interactive = False
+        self.global_listener = keyboard.Listener(on_press=self._on_press_global)
+        self.global_listener.daemon = True
+        self.global_listener.start()
 
     def fetch_dynamic(self, url, click_selector=None):
         """Load and render page with Selenium and simulate clicks if necessary"""
@@ -153,6 +160,10 @@ class BlindCrawler:
         except Exception as e:
             print(f"[TTS Error] {e}")
 
+        # Announce clickable items and enable interactive re-announcement
+        self.announce_clickables()
+        self.interactive = True
+
         # Enter interactive loop for user-driven clicks
         while True:
             choice = input("Enter CSS selector to click (or 'exit' to quit): ").strip()
@@ -182,9 +193,42 @@ class BlindCrawler:
             except Exception as e:
                 print(f"[Interaction Error] {e}")
 
+        # Exit interactive mode and stop listener
+        self.interactive = False
+        self.global_listener.stop()
+
         # Clean up after user exits
         self.driver.quit()
         print("Crawling completed.")
+
+    def _on_press_global(self, key):
+        # If in interactive mode and space pressed, re-announce clickables
+        try:
+            if self.interactive and key == keyboard.Key.space:
+                self.announce_clickables()
+        except Exception:
+            pass
+
+    def announce_clickables(self):
+        """Speak the available clickable items and instructions."""
+        try:
+            items = self.driver.find_elements(By.CSS_SELECTOR, "a, button")
+            texts = [item.text for item in items if item.text.strip()]
+            if texts:
+                item_list = ", ".join(texts[:5])
+                speech_text = f"The following clickable items are available: {item_list}. To click an item, please enter its CSS selector. To exit, press escape or type exit."
+            else:
+                speech_text = "No clickable items detected on this page. To exit, press escape or type exit."
+            self.speak(speech_text)
+        except Exception as e:
+            print(f"[TTS Error] {e}")
+
+    def speak(self, text):
+        try:
+            self.tts_engine.say(text)
+            self.tts_engine.runAndWait()
+        except Exception as e:
+            print(f"[TTS Error] {e}")
 
 if __name__ == "__main__":
     import os
