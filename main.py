@@ -9,10 +9,13 @@ A general crawler framework for extracting content in a blind-friendly manner:
 """
 
 import time
+import os
+import platform
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 
 from selenium import webdriver
 
@@ -25,13 +28,21 @@ from pynput import keyboard
 class BlindCrawler:
     def __init__(self, start_url, api_key, headless=True):
         self.start_url = start_url
-        self.tts_engine = pyttsx3.init()
+        
+        # Initialize TTS engine
+        try:
+            self.tts_engine = pyttsx3.init()
+        except Exception as e:
+            print(f"Warning: Could not initialize pyttsx3 ({e}). Using system commands for TTS.")
+            self.tts_engine = None
 
         # Selenium browser setup
         options = Options()
         if headless:
             options.add_argument("--headless")
         options.add_argument("--disable-gpu")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-popup-blocking")
         self.driver = webdriver.Chrome(options=options)
 
         # OpenAI client
@@ -43,6 +54,52 @@ class BlindCrawler:
         self.global_listener = keyboard.Listener(on_press=self._on_press_global)
         self.global_listener.daemon = True
         self.global_listener.start()
+
+    def speak(self, text):
+        """Enhanced text-to-speech function with fallback mechanisms"""
+        if not text or not text.strip():
+            print("Warning: Empty text provided to speak function")
+            return
+            
+        print("Speaking:", text[:50] + "..." if len(text) > 50 else text)
+        
+        # Try pyttsx3 first
+        if self.tts_engine is not None:
+            try:
+                self.tts_engine.say(text)
+                self.tts_engine.runAndWait()
+                return
+            except Exception as e:
+                print(f"[pyttsx3 Error] {e}")
+                # Try to reinitialize engine
+                try:
+                    self.tts_engine = pyttsx3.init()
+                    self.tts_engine.say(text)
+                    self.tts_engine.runAndWait()
+                    return
+                except Exception as e2:
+                    print(f"[pyttsx3 Reinit Error] {e2}")
+                    # If reinitialization fails, set to None to use system commands
+                    self.tts_engine = None
+        
+        # Fallback to system commands
+        try:
+            system = platform.system().lower()
+            if system == 'darwin':  # macOS
+                # Escape double quotes in text
+                escaped_text = text.replace('"', '\\"')
+                os.system(f'say "{escaped_text}"')
+            elif system == 'linux':
+                escaped_text = text.replace('"', '\\"')
+                os.system(f'espeak "{escaped_text}"')
+            elif system == 'windows':
+                import subprocess
+                ps_script = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{text.replace("'", "''")}')"
+                subprocess.run(["powershell", "-Command", ps_script])
+            print("Used system TTS command")
+        except Exception as e:
+            print(f"[System TTS Error] {e}")
+            print("Text was not spoken. Check your TTS configuration.")
 
     def fetch_dynamic(self, url, click_selector=None):
         """Fetch dynamic page content, selectively retrieving only main content"""
@@ -203,13 +260,6 @@ class BlindCrawler:
                 "summary": "Error occurred while analyzing the page. Please try another action.",
                 "click_selector": ""
             }
-
-    def speak(self, text):
-        try:
-            self.tts_engine.say(text)
-            self.tts_engine.runAndWait()
-        except:
-            pass
 
     def announce_clickables(self):
         """Get and announce clickable items on the page, more robust implementation"""
@@ -380,7 +430,6 @@ class BlindCrawler:
                 continue
                 
             # Save information about the element to click, not the element itself
-            # This way, even if the element becomes stale, we can try to relocate it
             try:
                 click_item = self.clickable_items[idx]
                 element_text = click_item.text.strip()
@@ -408,6 +457,10 @@ class BlindCrawler:
                     }
                     return getElementXPath(arguments[0]);
                 """, click_item)
+                
+                # Announce the user's selection immediately
+                selection_text = element_text or f"option {idx+1}"
+                self.speak(f"You selected {selection_text}. Processing, please wait.")
             except Exception as e:
                 print(f"Error saving element info: {e}")
                 self.speak("Could not find the selected element.")
@@ -487,79 +540,49 @@ class BlindCrawler:
                 self.announce_clickables()
                 continue
                 
-            # Wait for page changes - three possibilities:
-            # 1. URL changes - standard navigation
-            # 2. Page content changes - AJAX or SPA
-            # 3. New window/tab opens - need to switch windows
-            
-            # First check if new window was created
+            # Wait for page changes - three possibilities
             try:
-                # Get all window handles
+                # First check if new window was created
                 window_handles = self.driver.window_handles
                 if len(window_handles) > 1:
                     # Switch to the newest window
                     self.driver.switch_to.window(window_handles[-1])
                     print("Switched to new window")
-                    # Give new window some time to load
                     time.sleep(3)
-            except Exception as e:
-                print(f"Window handling error: {e}")
-            
-            # Check if URL changed
-            url_changed = False
-            try:
-                url_changed = WebDriverWait(self.driver, 3).until(
-                    lambda d: d.current_url != current_url
-                )
-                if url_changed:
-                    print("URL changed:", self.driver.current_url)
-                    # Give new page time to load
-                    time.sleep(2)
-            except:
-                print("URL did not change")
-                # URL didn't change, might be AJAX content update, wait a bit
-                time.sleep(3)
-            
-            # Try to get page HTML - using more robust method
-            try:
-                # First try to get main content container
-                content_html = ""
-                for selector in ["article", "main", "#content", ".content", "body"]:
-                    try:
-                        content = self.driver.find_element(By.CSS_SELECTOR, selector)
-                        content_html = content.get_attribute("outerHTML")
-                        print(f"Found content with selector: {selector}")
-                        break
-                    except:
-                        continue
-                        
-                # If no content container found, get entire page source
-                if not content_html:
-                    content_html = self.driver.page_source
-                    print("Using full page source")
-                    
-                # Get current URL info
+                
+                # Check if URL changed
+                try:
+                    url_changed = WebDriverWait(self.driver, 3).until(
+                        lambda d: d.current_url != current_url
+                    )
+                    if url_changed:
+                        print("URL changed:", self.driver.current_url)
+                        time.sleep(2)
+                except:
+                    print("URL did not change")
+                    # URL didn't change, might be AJAX content update
+                    time.sleep(3)
+                
+                # Get current URL info for announcement
                 url = self.driver.current_url
                 parsed = urlparse(url)
                 domain = parsed.netloc
                 
-                # Announce user selection and navigation
-                selection_text = element_text or "selected"
-                self.speak(f"You have selected the {selection_text} option, now visiting {domain} page, please wait")
-                
-                # Short pause
-                time.sleep(1)
+                # Tell user where they are now
+                self.speak(f"Now on {domain} page. Analyzing content...")
             except Exception as e:
-                print(f"[Content Extraction Error] {e}")
-                self.speak("There was an error extracting content from the page.")
-                # Try to refresh clickable items
-                self.announce_clickables()
-                continue
-
-            # Re-analyze
+                print(f"[Navigation detection error] {e}")
+            
+            # Get and analyze the new page content
             try:
+                # Fetch the new page content
+                content_html = self.fetch_dynamic(self.driver.current_url)
+                
+                # Analyze with LLM
                 res = self.analyze_with_llm(content_html)
-                summary = res.get("summary","")
+                summary = res.get("summary", "")
+                
+                # Process the summary
                 raw = summary.strip()
                 if raw.startswith("```"):
                     start = raw.find('{'); end = raw.rfind('}')
@@ -570,22 +593,26 @@ class BlindCrawler:
                     summary = data.get("summary", raw)
                 except:
                     summary = raw
+                    
+                # Truncate to two sentences
                 parts = summary.split('. ')
                 if len(parts)>2:
                     summary = '. '.join(parts[:2]).strip()
                     if not summary.endswith('.'):
                         summary += '.'
-
+                
+                # Output and speak the summary
                 print("→ Summary:", summary)
                 self.speak(summary)
                 
-                # Wait to ensure page has fully loaded
-                time.sleep(2)
+                # Wait to ensure speech is complete
+                time.sleep(1)
             except Exception as e:
                 print(f"[Analysis Error] {e}")
                 self.speak("There was an error analyzing the page content.")
             
             # Announce new clickable items for this page
+            time.sleep(1)  # Give a slight pause
             self.announce_clickables()
 
         self.interactive = False
