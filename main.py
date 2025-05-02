@@ -102,20 +102,26 @@ class BlindCrawler:
             print("Text was not spoken. Check your TTS configuration.")
 
     def fetch_dynamic(self, url, click_selector=None):
-        """Fetch dynamic page content, selectively retrieving only main content"""
+        """Fetch dynamic page content with special handling for Google and similar sites"""
         try:
             print(f"Fetching URL: {url}")
-            self.driver.get(url)
-            # Wait for page to load
-            try:
-                # Wait for page ready state
-                WebDriverWait(self.driver, 10).until(
-                    lambda d: d.execute_script("return document.readyState") == "complete"
-                )
-                print("Page loaded (readyState complete)")
-            except Exception as e:
-                print(f"Wait for page load error: {e}")
-                
+            if self.driver.current_url != url:
+                self.driver.get(url)
+                # Wait for page to load
+                try:
+                    # Wait for page ready state
+                    WebDriverWait(self.driver, 10).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
+                    )
+                    print("Page loaded (readyState complete)")
+                except Exception as e:
+                    print(f"Wait for page load error: {e}")
+            else:
+                print("Already on requested URL, refreshing content view")
+            
+            # Allow more time for JavaScript-heavy sites to initialize
+            time.sleep(3)
+            
             # If we need to click an element
             if click_selector:
                 print(f"Attempting to click selector: {click_selector}")
@@ -133,77 +139,195 @@ class BlindCrawler:
                     except:
                         self.driver.execute_script("arguments[0].click();", element)
                     print(f"Clicked element with selector: {click_selector}")
-                    # Wait for page to update after click
+                    # Wait for dynamic content to load after click
                     time.sleep(2)
                 except Exception as e:
                     print(f"Click selector error: {e}")
-                    
-            # Perform limited scrolling to avoid loading too much content
-            try:
-                # Get page height
-                total_height = self.driver.execute_script("return document.body.scrollHeight")
-                # Moderate scroll, not to the bottom
-                self.driver.execute_script(f"window.scrollTo(0, {min(1000, total_height/2)});")
-                time.sleep(0.5)
-                # Scroll back to top
-                self.driver.execute_script("window.scrollTo(0, 0);")
-                print("Completed moderate scrolling")
-            except Exception as e:
-                print(f"Scroll error: {e}")
                 
-            # Intelligently extract main page content, not the entire page
-            # Try various content containers in priority order
+            # For Google homepage specifically, or when body seems empty
+            is_google = "google.com" in url.lower()
+            
+            # Check if normal extraction would yield empty results
+            body_text_length = self.driver.execute_script("return document.body.innerText.length")
+            print(f"Body text length: {body_text_length}")
+            
+            if is_google or body_text_length < 100:
+                print("Using special extraction for Google or minimal content page")
+                try:
+                    # Direct extraction of all visible text and links
+                    special_extraction = self.driver.execute_script("""
+                        // Get all visible text
+                        function getVisibleText(element) {
+                            let text = '';
+                            
+                            // Process this element's direct text if it's visible
+                            const style = window.getComputedStyle(element);
+                            if (element.offsetWidth && element.offsetHeight && 
+                                style.display !== 'none' && style.visibility !== 'hidden') {
+                                
+                                // Get direct text of this element (not children)
+                                for (const node of element.childNodes) {
+                                    if (node.nodeType === Node.TEXT_NODE) {
+                                        const trimmed = node.textContent.trim();
+                                        if (trimmed) text += trimmed + ' ';
+                                    }
+                                }
+                            }
+                            
+                            // Process children
+                            for (const child of element.children) {
+                                text += getVisibleText(child) + ' ';
+                            }
+                            
+                            return text;
+                        }
+                        
+                        // Get all visible links
+                        function getVisibleLinks() {
+                            const links = [];
+                            document.querySelectorAll('a').forEach(a => {
+                                const style = window.getComputedStyle(a);
+                                if (a.offsetWidth && a.offsetHeight && 
+                                    style.display !== 'none' && style.visibility !== 'hidden') {
+                                    
+                                    const text = a.innerText.trim();
+                                    const href = a.getAttribute('href');
+                                    
+                                    if (text && href) {
+                                        links.push({ text, href });
+                                    }
+                                }
+                            });
+                            return links;
+                        }
+                        
+                        // Get visible buttons
+                        function getVisibleButtons() {
+                            const buttons = [];
+                            document.querySelectorAll('button, [role="button"]').forEach(b => {
+                                const style = window.getComputedStyle(b);
+                                if (b.offsetWidth && b.offsetHeight && 
+                                    style.display !== 'none' && style.visibility !== 'hidden') {
+                                    
+                                    const text = b.innerText.trim();
+                                    if (text) {
+                                        buttons.push(text);
+                                    }
+                                }
+                            });
+                            return buttons;
+                        }
+                        
+                        // Get any visible input fields
+                        function getVisibleInputs() {
+                            const inputs = [];
+                            document.querySelectorAll('input:not([type="hidden"]), textarea').forEach(input => {
+                                const style = window.getComputedStyle(input);
+                                if (input.offsetWidth && input.offsetHeight && 
+                                    style.display !== 'none' && style.visibility !== 'hidden') {
+                                    
+                                    const type = input.getAttribute('type') || 'text';
+                                    const placeholder = input.getAttribute('placeholder') || '';
+                                    const label = input.getAttribute('aria-label') || '';
+                                    
+                                    inputs.push({ type, placeholder, label });
+                                }
+                            });
+                            return inputs;
+                        }
+                        
+                        // Build a structured representation of the page
+                        return {
+                            title: document.title,
+                            url: window.location.href,
+                            visibleText: getVisibleText(document.body),
+                            links: getVisibleLinks(),
+                            buttons: getVisibleButtons(),
+                            inputs: getVisibleInputs()
+                        };
+                    """)
+                    
+                    # Convert the JS result to an HTML representation
+                    structured_html = f"""
+                    <html>
+                    <head>
+                        <title>{special_extraction['title']}</title>
+                    </head>
+                    <body>
+                        <h1>{special_extraction['title']}</h1>
+                        <p>URL: {special_extraction['url']}</p>
+                        
+                        <h2>Page Text:</h2>
+                        <p>{special_extraction['visibleText']}</p>
+                        
+                        <h2>Links:</h2>
+                        <ul>
+                            {"".join([f'<li><a href="{link["href"]}">{link["text"]}</a></li>' for link in special_extraction['links']])}
+                        </ul>
+                        
+                        <h2>Buttons:</h2>
+                        <ul>
+                            {"".join([f'<li>{button}</li>' for button in special_extraction['buttons']])}
+                        </ul>
+                        
+                        <h2>Input Fields:</h2>
+                        <ul>
+                            {"".join([f'<li>Type: {inp["type"]}, Placeholder: {inp["placeholder"]}, Label: {inp["label"]}</li>' for inp in special_extraction['inputs']])}
+                        </ul>
+                    </body>
+                    </html>
+                    """
+                    
+                    print(f"Generated structured HTML representation, length: {len(structured_html)}")
+                    return structured_html
+                except Exception as e:
+                    print(f"Special extraction error: {e}")
+                    # Continue to regular extraction methods if this fails
+            
+            # Try standard content extraction methods
             content_selectors = [
-                "article", "main", 
-                "#content", ".content", "#main", ".main",
-                "section", ".post", ".article",
-                ".page-content", ".entry-content"
+                "article", "main", "#content", ".content", "#main", ".main",
+                "section", ".post", ".article", "[role='main']"
             ]
             
             # Try to find main content container
             for selector in content_selectors:
                 try:
                     elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        # Find the most content-rich element (usually the one with most text)
-                        max_length = 0
-                        best_html = ""
-                        for el in elements:
+                    for el in elements:
+                        try:
                             html = el.get_attribute("outerHTML")
-                            if len(html) > max_length:
-                                max_length = len(html)
-                                best_html = html
-                        
-                        if best_html:
-                            print(f"Found main content container: {selector}, length: {max_length}")
-                            return best_html
-                except Exception as e:
-                    print(f"Selector {selector} lookup error: {e}")
+                            if len(html) > 100:  # Only consider substantial content
+                                print(f"Found content with selector: {selector}, length: {len(html)}")
+                                return html
+                        except:
+                            continue
+                except:
                     continue
             
-            # If no main content container found, try to extract only visible elements from body
+            # If no main content found, use full page but clean it
             try:
-                # Use JavaScript to remove all script, style, meta etc. invisible elements
+                # Use JavaScript to extract and clean the visible content
                 cleaned_html = self.driver.execute_script("""
-                    var clone = document.body.cloneNode(true);
-                    // Remove scripts and styles
-                    var elementsToRemove = clone.querySelectorAll('script, style, link, meta, noscript, iframe');
-                    elementsToRemove.forEach(function(element) {
-                        element.parentNode.removeChild(element);
-                    });
+                    // Create a clone to work with
+                    const clone = document.documentElement.cloneNode(true);
+                    
+                    // Remove scripts and styles to reduce size
+                    const elementsToRemove = clone.querySelectorAll('script, style, link, meta, noscript, iframe');
+                    elementsToRemove.forEach(el => el.parentNode.removeChild(el));
+                    
                     return clone.outerHTML;
                 """)
-                print(f"Extracted cleaned body content, length: {len(cleaned_html)}")
+                
+                print(f"Using cleaned full page HTML, length: {len(cleaned_html)}")
                 return cleaned_html
             except Exception as e:
                 print(f"HTML cleaning error: {e}")
-                
-            # Last resort: return entire page, but it will be truncated in analyze_with_llm
-            print("No main content container found, returning entire page")
+            
+            # Absolute last resort: return page source
             return self.driver.page_source
         except Exception as e:
             print(f"[Fetch Error] {e}")
-            # Return current page content, even if it's an error page
             return self.driver.page_source
 
     def analyze_with_llm(self, html):
@@ -461,6 +585,30 @@ class BlindCrawler:
                 # Announce the user's selection immediately
                 selection_text = element_text or f"option {idx+1}"
                 self.speak(f"You selected {selection_text}. Processing, please wait.")
+                
+                # Take a snapshot of current DOM state before clicking
+                pre_click_snapshot = self.driver.execute_script("""
+                    return {
+                        bodyText: document.body.innerText.substring(0, 1000), 
+                        elementCount: document.getElementsByTagName('*').length,
+                        height: document.body.scrollHeight,
+                        width: document.body.scrollWidth,
+                        visibleElements: Array.from(
+                            document.querySelectorAll('a, button, [role="button"], input[type="submit"]')
+                        ).filter(el => {
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                el.offsetWidth > 0 &&
+                                el.offsetHeight > 0 &&
+                                rect.top < window.innerHeight &&
+                                rect.left < window.innerWidth &&
+                                getComputedStyle(el).visibility !== 'hidden' &&
+                                getComputedStyle(el).display !== 'none'
+                            );
+                        }).length
+                    }
+                """)
+                print("Pre-click DOM snapshot captured")
             except Exception as e:
                 print(f"Error saving element info: {e}")
                 self.speak("Could not find the selected element.")
@@ -540,7 +688,8 @@ class BlindCrawler:
                 self.announce_clickables()
                 continue
                 
-            # Wait for page changes - three possibilities
+            # Wait for page changes - improved detection for SPAs
+            content_changed = False
             try:
                 # First check if new window was created
                 window_handles = self.driver.window_handles
@@ -548,6 +697,7 @@ class BlindCrawler:
                     # Switch to the newest window
                     self.driver.switch_to.window(window_handles[-1])
                     print("Switched to new window")
+                    content_changed = True
                     time.sleep(3)
                 
                 # Check if URL changed
@@ -557,11 +707,70 @@ class BlindCrawler:
                     )
                     if url_changed:
                         print("URL changed:", self.driver.current_url)
+                        content_changed = True
                         time.sleep(2)
                 except:
-                    print("URL did not change")
-                    # URL didn't change, might be AJAX content update
-                    time.sleep(3)
+                    print("URL did not change, checking for DOM changes...")
+                    
+                    # Initial wait for any AJAX or dynamic content
+                    time.sleep(2)
+                    
+                    # Check for DOM changes when URL didn't change (for SPA detection)
+                    max_wait = 10  # Maximum seconds to wait for changes
+                    start_time = time.time()
+                    
+                    while not content_changed and (time.time() - start_time) < max_wait:
+                        # Get current DOM snapshot and compare with pre-click
+                        post_click_snapshot = self.driver.execute_script("""
+                            return {
+                                bodyText: document.body.innerText.substring(0, 1000),
+                                elementCount: document.getElementsByTagName('*').length,
+                                height: document.body.scrollHeight,
+                                width: document.body.scrollWidth,
+                                visibleElements: Array.from(
+                                    document.querySelectorAll('a, button, [role="button"], input[type="submit"]')
+                                ).filter(el => {
+                                    const rect = el.getBoundingClientRect();
+                                    return (
+                                        el.offsetWidth > 0 &&
+                                        el.offsetHeight > 0 &&
+                                        rect.top < window.innerHeight &&
+                                        rect.left < window.innerWidth &&
+                                        getComputedStyle(el).visibility !== 'hidden' &&
+                                        getComputedStyle(el).display !== 'none'
+                                    );
+                                }).length
+                            }
+                        """)
+                        
+                        # Detect various types of changes
+                        text_changed = pre_click_snapshot['bodyText'] != post_click_snapshot['bodyText']
+                        elements_changed = abs(pre_click_snapshot['elementCount'] - post_click_snapshot['elementCount']) > 5
+                        size_changed = (
+                            abs(pre_click_snapshot['height'] - post_click_snapshot['height']) > 50 or
+                            abs(pre_click_snapshot['width'] - post_click_snapshot['width']) > 50
+                        )
+                        visible_elements_changed = pre_click_snapshot['visibleElements'] != post_click_snapshot['visibleElements']
+                        
+                        # Determine if content changed significantly
+                        if text_changed or elements_changed or size_changed or visible_elements_changed:
+                            print("DOM changes detected:")
+                            if text_changed: print("- Text content changed")
+                            if elements_changed: print(f"- Element count changed: {pre_click_snapshot['elementCount']} → {post_click_snapshot['elementCount']}")
+                            if size_changed: print(f"- Size changed: {pre_click_snapshot['height']}x{pre_click_snapshot['width']} → {post_click_snapshot['height']}x{post_click_snapshot['width']}")
+                            if visible_elements_changed: print(f"- Visible interactive elements changed: {pre_click_snapshot['visibleElements']} → {post_click_snapshot['visibleElements']}")
+                            
+                            content_changed = True
+                            break
+                        
+                        # Try scrolling slightly to trigger lazy loading
+                        self.driver.execute_script("window.scrollBy(0, 100);")
+                        time.sleep(0.5)
+                    
+                    if not content_changed:
+                        print("No significant DOM changes detected after click")
+                        # Even if no changes detected, we'll still proceed to analyze the page
+                        # as there might be subtle changes our detection missed
                 
                 # Get current URL info for announcement
                 url = self.driver.current_url
@@ -569,13 +778,18 @@ class BlindCrawler:
                 domain = parsed.netloc
                 
                 # Tell user where they are now
-                self.speak(f"Now on {domain} page. Analyzing content...")
+                if content_changed:
+                    self.speak(f"Page content has updated. Analyzing new content...")
+                else:
+                    self.speak(f"Still on {domain}. Analyzing current page content...")
+                    
             except Exception as e:
                 print(f"[Navigation detection error] {e}")
+                self.speak("Navigation detection encountered an error. Continuing with analysis.")
             
-            # Get and analyze the new page content
+            # Get and analyze the page content (even if no changes detected)
             try:
-                # Fetch the new page content
+                # Fetch the current page content
                 content_html = self.fetch_dynamic(self.driver.current_url)
                 
                 # Analyze with LLM
