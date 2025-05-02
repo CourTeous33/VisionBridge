@@ -115,11 +115,7 @@ class BlindCrawler:
         domain = parsed.netloc or parsed.path.split('/')[0]
         print(f"Visiting: {url}")
         # Announce the start of visiting
-        try:
-            self.tts_engine.say(f"I am currently visiting {domain}, please wait")
-            self.tts_engine.runAndWait()
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+        self.speak(f"I am currently visiting {domain}, please wait")
         # Initial page load with Selenium
         try:
             html = self.fetch_dynamic(url)
@@ -163,11 +159,7 @@ class BlindCrawler:
                 if not summary.endswith('.'):
                     summary += '.'
         print("→ Summary:", summary, "\n")
-        try:
-            self.tts_engine.say(summary)
-            self.tts_engine.runAndWait()
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+        self.speak(summary)
 
         # Announce clickable items and enable interactive re-announcement
         self.announce_clickables()
@@ -192,7 +184,14 @@ class BlindCrawler:
 
             # Perform click on current page and navigate
             try:
-                element.click()
+                # Scroll element into view and click
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                time.sleep(0.5)
+                try:
+                    element.click()
+                except Exception:
+                    # Fallback to JavaScript click
+                    self.driver.execute_script("arguments[0].click();", element)
                 # Wait for new article content to load
                 WebDriverWait(self.driver, 10).until(
                     EC.presence_of_element_located((By.TAG_NAME, "article"))
