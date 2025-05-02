@@ -500,7 +500,7 @@ class BlindCrawler:
         # Initial visit
         url = self.start_url
         parsed = urlparse(url)
-        domain = parsed.netloc
+        domain = parsed.netloc[parsed.netloc.find('.') + 1:]
         print(f"Visiting: {url}")
         self.speak(f"I am currently visiting {domain}, please wait")
 
