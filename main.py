@@ -46,6 +46,8 @@ class BlindCrawler:
 
         # Setup global listener for spacebar to re-announce clickables
         self.interactive = False
+        # Store clickable elements for user selection
+        self.clickable_items = []
         self.global_listener = keyboard.Listener(on_press=self._on_press_global)
         self.global_listener.daemon = True
         self.global_listener.start()
@@ -153,6 +155,13 @@ class BlindCrawler:
                 # If not valid JSON, use the cleaned raw text
                 summary = raw
 
+        # Truncate summary to first two sentences if too long
+        if isinstance(summary, str):
+            parts = summary.split('. ')
+            if len(parts) > 2:
+                summary = '. '.join(parts[:2]).strip()
+                if not summary.endswith('.'):
+                    summary += '.'
         print("→ Summary:", summary, "\n")
         try:
             self.tts_engine.say(summary)
@@ -166,32 +175,74 @@ class BlindCrawler:
 
         # Enter interactive loop for user-driven clicks
         while True:
-            choice = input("Enter CSS selector to click (or 'exit' to quit): ").strip()
+            choice = input("Enter option number to click (or 'exit' to quit): ").strip()
             if choice.lower() in ('exit', 'quit'):
                 break
-            # Perform click and re-analyze
+            # Handle numeric selection
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(self.clickable_items):
+                    element = self.clickable_items[idx]
+                else:
+                    print("Invalid option number.")
+                    continue
+            else:
+                print("Please enter a valid number.")
+                continue
+
+            # Perform click on current page and navigate
             try:
-                html = self.fetch_dynamic(url, choice)
-                result2 = self.analyze_with_llm(html)
-                summary = result2.get("summary", "")
-                # Normalize summary JSON/code if needed
-                if isinstance(summary, str):
-                    raw = summary.strip()
-                    if raw.startswith("```"):
-                        start = raw.find('{')
-                        end = raw.rfind('}')
-                        if start != -1 and end != -1 and end > start:
-                            raw = raw[start:end+1]
-                    try:
-                        data = _json.loads(raw)
-                        summary = data.get("summary", raw)
-                    except Exception:
-                        summary = raw
-                print("→ Summary:", summary, "\n")
-                self.tts_engine.say(summary)
-                self.tts_engine.runAndWait()
+                element.click()
+                # Wait for new article content to load
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "article"))
+                )
+                # Scroll to load lazy content
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                # Extract new page HTML (article only)
+                try:
+                    article = self.driver.find_element(By.TAG_NAME, "article")
+                    html = article.get_attribute("outerHTML")
+                except Exception:
+                    html = self.driver.page_source
+                # Update URL and domain for announcements if needed
+                url = self.driver.current_url
+                parsed = urlparse(url)
+                domain = parsed.netloc or parsed.path.split('/')[0]
+                self.speak(f"Now visiting {domain}, please wait")
             except Exception as e:
                 print(f"[Interaction Error] {e}")
+                continue
+
+            # Analyze the new content
+            result2 = self.analyze_with_llm(html)
+            summary = result2.get("summary", "")
+            # Normalize summary if needed (reuse existing normalization)
+            if isinstance(summary, str):
+                raw = summary.strip()
+                if raw.startswith("```"):
+                    start = raw.find('{')
+                    end = raw.rfind('}')
+                    if start != -1 and end != -1 and end > start:
+                        raw = raw[start:end+1]
+                try:
+                    data = _json.loads(raw)
+                    summary = data.get("summary", raw)
+                except Exception:
+                    summary = raw
+
+            # Truncate summary to first two sentences if too long
+            if isinstance(summary, str):
+                parts = summary.split('. ')
+                if len(parts) > 2:
+                    summary = '. '.join(parts[:2]).strip()
+                    if not summary.endswith('.'):
+                        summary += '.'
+            print("→ Summary:", summary, "\n")
+            self.speak(summary)
+            # Re-announce clickables
+            self.announce_clickables()
 
         # Exit interactive mode and stop listener
         self.interactive = False
@@ -212,13 +263,14 @@ class BlindCrawler:
     def announce_clickables(self):
         """Speak the available clickable items and instructions."""
         try:
-            items = self.driver.find_elements(By.CSS_SELECTOR, "a, button")
-            texts = [item.text for item in items if item.text.strip()]
-            if texts:
-                item_list = ", ".join(texts[:5])
-                speech_text = f"The following clickable items are available: {item_list}. To click an item, please enter its CSS selector. To exit, press escape or type exit."
+            elements = self.driver.find_elements(By.CSS_SELECTOR, "a, button")
+            # Filter and take first 5 with non-empty text
+            self.clickable_items = [el for el in elements if el.text.strip()][:5]
+            if self.clickable_items:
+                options = [f"Option {i+1}: {el.text.strip()}" for i, el in enumerate(self.clickable_items)]
+                speech_text = "The following clickable items are available. " + ". ".join(options) + ". To click an item, say its number. To exit, say exit."
             else:
-                speech_text = "No clickable items detected on this page. To exit, press escape or type exit."
+                speech_text = "No clickable items detected on this page. To exit, say exit."
             self.speak(speech_text)
         except Exception as e:
             print(f"[TTS Error] {e}")
@@ -234,7 +286,7 @@ if __name__ == "__main__":
     import os
     # Read API key from environment variable (or set it directly here)
     OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-    START_URL   = "https://edition.cnn.com/travel/hagia-sophia-istanbul-hidden-history/index.html"
+    START_URL   = "https://history.howstuffworks.com/historical-events/10-things-missing-without-trace.htm"
     crawler = BlindCrawler(
         start_url=START_URL,
         api_key=OPENAI_KEY,
