@@ -1,0 +1,4 @@
+openai>=1.76.2
+selenium>=4.31.0
+pyttsx3>=2.98
+pynput>=1.8.1
